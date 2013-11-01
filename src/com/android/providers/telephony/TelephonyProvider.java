@@ -148,7 +148,8 @@ public class TelephonyProvider extends ContentProvider
                     "carrier_enabled BOOLEAN," +
                     "bearer INTEGER," +
                     "mvno_type TEXT," +
-                    "mvno_match_data TEXT);");
+                    "mvno_match_data TEXT," +
+                    "preferred BOOLEAN DEFAULT 0);");
 
             initDatabase(db);
         }
@@ -261,10 +262,22 @@ public class TelephonyProvider extends ContentProvider
                 oldVersion = 8 << 16 | 6;
             }
             if (oldVersion < (9 << 16 | 6)) {
-                // Add preferred field to the APN. The XML file does not change.
-                db.execSQL("ALTER TABLE " + CARRIERS_TABLE +
-                        " ADD COLUMN preferred BOOLEAN DEFAULT 0;");
-                oldVersion = 9 << 16 | 6;
+                // Add preferred field to the APN.
+                // The XML file does not change.
+                try {
+                    db.execSQL("ALTER TABLE " + CARRIERS_TABLE +
+                            " ADD COLUMN preferred BOOLEAN DEFAULT 0;");
+                    oldVersion = 9 << 16 | 6;
+                } catch (SQLException e) {
+                    // Original implementation for preferred apn feature
+                    // didn't include new version for database
+                    // Consequently we can have version 8 database with and
+                    // without preferred column
+                    // Hence, this operation can result in exception
+                    // (if column is already there)
+                    // Just log it
+                    Log.e(TAG, "Exception adding preferred column to database. ", e);
+                }
             }
         }
 
