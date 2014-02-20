@@ -29,6 +29,7 @@ import android.database.sqlite.SQLiteOpenHelper;
 import android.database.sqlite.SQLiteQueryBuilder;
 import android.net.Uri;
 import android.provider.Telephony.Blacklist;
+import android.telephony.PhoneNumberUtils;
 import android.text.TextUtils;
 import android.util.Log;
 
@@ -37,7 +38,7 @@ public class BlacklistProvider extends ContentProvider {
     private static final boolean DEBUG = true;
 
     private static final String DATABASE_NAME = "blacklist.db";
-    private static final int DATABASE_VERSION = 1;
+    private static final int DATABASE_VERSION = 3;
 
     private static final String BLACKLIST_TABLE = "blacklist";
     private static final String COLUMN_NORMALIZED = "normalized_number";
@@ -74,7 +75,7 @@ public class BlacklistProvider extends ContentProvider {
             db.execSQL("CREATE TABLE " + BLACKLIST_TABLE +
                 "(_id INTEGER PRIMARY KEY," +
                     "number TEXT," +
-                    "normalized_number TEXT UNIQUE," +
+                    "normalized_number TEXT," +
                     "is_regex INTEGER," +
                     "phone INTEGER DEFAULT 0," +
                     "message INTEGER DEFAULT 0);");
@@ -82,7 +83,44 @@ public class BlacklistProvider extends ContentProvider {
 
         @Override
         public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-            // won't happen, we're at version 1
+            if (oldVersion < 2) {
+                // drop the uniqueness constraint that was present on the DB in V1
+                db.execSQL("ALTER TABLE " + BLACKLIST_TABLE +
+                        " RENAME TO " + BLACKLIST_TABLE + "_old;");
+                onCreate(db);
+                db.execSQL("INSERT INTO " + BLACKLIST_TABLE +
+                        " SELECT * FROM " + BLACKLIST_TABLE + "_old;");
+            }
+
+            if (oldVersion < 3) {
+                // update the normalized number column, v1 and v2 didn't handle
+                // alphanumeric 'numbers' correctly
+
+                Cursor rows = db.query(BLACKLIST_TABLE,
+                        new String[] { Blacklist._ID, Blacklist.NUMBER },
+                        null, null, null, null, null);
+
+                try {
+                    db.beginTransaction();
+                    if (rows != null) {
+                        ContentValues cv = new ContentValues();
+                        String[] rowId = new String[1];
+
+                        while (rows.moveToNext()) {
+                            rowId[0] = rows.getString(0);
+                            cv.clear();
+                            cv.put(COLUMN_NORMALIZED, normalizeNumber(rows.getString(1)));
+                            db.update(BLACKLIST_TABLE, cv, Blacklist._ID + "= ?", rowId);
+                        }
+                    }
+                    db.setTransactionSuccessful();
+                } finally {
+                    db.endTransaction();
+                    if (rows != null) {
+                        rows.close();
+                    }
+                }
+            }
         }
     }
 
@@ -205,19 +243,28 @@ public class BlacklistProvider extends ContentProvider {
 
         switch (match) {
             case BL_ALL:
-                count = db.delete(BLACKLIST_TABLE, where, whereArgs);
                 break;
             case BL_ID:
-                count = db.delete(BLACKLIST_TABLE, Blacklist._ID + " = ?",
-                        new String[] { uri.getLastPathSegment() });
+                if (where != null || whereArgs != null) {
+                    throw new UnsupportedOperationException(
+                            "Cannot delete URI " + uri + " with a where clause");
+                }
+                where = Blacklist._ID + " = ?";
+                whereArgs = new String[] { uri.getLastPathSegment() };
+                break;
             case BL_NUMBER:
-                count = db.delete(BLACKLIST_TABLE, COLUMN_NORMALIZED + " = ?",
-                        new String[] { normalizeNumber(uri.getLastPathSegment()) });
+                if (where != null || whereArgs != null) {
+                    throw new UnsupportedOperationException(
+                            "Cannot delete URI " + uri + " with a where clause");
+                }
+                where = COLUMN_NORMALIZED + " = ?";
+                whereArgs = new String[] { normalizeNumber(uri.getLastPathSegment()) };
                 break;
             default:
                 throw new UnsupportedOperationException("Cannot delete that URI: " + uri);
         }
 
+        count = db.delete(BLACKLIST_TABLE, where, whereArgs);
         if (DEBUG) Log.d(TAG, "delete result count " + count);
 
         if (count > 0) {
@@ -324,9 +371,9 @@ public class BlacklistProvider extends ContentProvider {
         mBackupManager.dataChanged();
     }
 
-    // mostly a copy of PhoneNumberUtils.normalizeNumber, with the exception of
-    // not converting characters and support for regex characters
-    private String normalizeNumber(String number) {
+    // mostly a copy of PhoneNumberUtils.normalizeNumber,
+    // with the exception of support for regex characters
+    private static String normalizeNumber(String number) {
         int len = number.length();
         StringBuilder ret = new StringBuilder(len);
 
@@ -336,6 +383,8 @@ public class BlacklistProvider extends ContentProvider {
             int digit = Character.digit(c, 10);
             if (digit != -1) {
                 ret.append(digit);
+            } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+                return normalizeNumber(PhoneNumberUtils.convertKeypadLettersToDigits(number));
             } else if (i == 0 && c == '+') {
                 ret.append(c);
             } else if (c == '*') {
